@@ -131,6 +131,47 @@ Usuario → FastAPI → OpenAI (GPT-4) → MCP Client → knowall-ai MCP Server 
    "Tienes 150 clientes activos en Business Central"
 ```
 
+### ¿Cómo sabe el agente qué tablas o cosas puede preguntar a BC?
+
+El mecanismo es **híbrido**:
+
+1. **Herramientas (dinámico)**  
+   Al arrancar, el agente obtiene la lista de **tools** del servidor MCP con `tools/list`. Esa lista viene del servidor knowall-ai (list_items, get_schema, get_items_by_field, create_item, update_item, delete_item). Los nombres y parámetros de las herramientas son los que el modelo usa para decidir qué puede hacer.
+
+2. **Recursos / entidades (parcialmente fijados en este proyecto)**  
+   Los **nombres de recursos** (customers, salesInvoices, items, etc.) no se descubren automáticamente desde BC. En este repo están:
+   - En el **system prompt** del agente (lista fija: customers, contacts, items, vendors, salesOrders, salesQuotes, salesInvoices, purchaseOrders, etc.).
+   - En listas usadas para **comprobar disponibilidad** en `/mcp/status` y `/mcp/resources` (mismo conjunto de recursos de prueba).
+
+   La herramienta `list_items` acepta un `resource` como string (ruta OData), así que el LLM puede en principio usar **cualquier** recurso que exponga la API de BC; la lista del prompt sirve de guía. No hay una lista “oficial” dinámica de todos los recursos de BC en este agente.
+
+3. **Esquema por recurso (dinámico)**  
+   Para saber campos y estructura de un recurso concreto, el agente puede llamar a **get_schema(resource)**. Eso devuelve metadata del recurso, no una lista de todos los recursos disponibles.
+
+**Resumen:** Las *acciones* (tools) son dinámicas (vienen del MCP). Los *recursos* que se mencionan al modelo son una lista fija en el prompt; para ampliarla habría que actualizar el system prompt o construir una lista desde BC/MCP si el servidor lo soportara en el futuro.
+
+### Memoria y respuestas más cortas (p. ej. “cliente con más facturas”, “facturado este mes”)
+
+Para preguntas como *“Dime el cliente con más facturas”* o *“¿Cuánto he facturado este mes?”* conviene controlar **cuántos datos** llegan al modelo y **cuánto** se guarda en la conversación:
+
+1. **Resultados de herramientas**  
+   Hoy el contenido completo de cada tool (p. ej. todo el JSON de `list_items`) se envía al LLM con `json.dumps(result)`. Si devuelves cientos de facturas o clientes, el contexto se llena y puede empeorar la respuesta o superar el límite.  
+   **Recomendación:**  
+   - Indicar en el system prompt que use **filtros OData** y **`top`** (y `skip` si hace falta) para pedir solo lo necesario.  
+   - Opcionalmente, en el agente: truncar o resumir el `result` antes de pasarlo al modelo (p. ej. quedarse con los primeros N registros, o con campos clave y un conteo) para que las respuestas sean más estables y cortas.
+
+2. **Historial de conversación**  
+   El historial se guarda sin límite en `conversations[conv_id]` (cada mensaje de usuario y asistente se añade). Con muchas vueltas, el contexto crece.  
+   **Recomendación:**  
+   - Mantener solo las últimas N vueltas, o  
+   - Resumir vueltas antiguas y dejar solo el resumen + últimos mensajes, o  
+   - Usar una ventana deslizante (sliding window) de mensajes.
+
+3. **Instrucciones al modelo**  
+   En el system prompt se puede añadir algo como: *“Responde de forma breve. Para agregaciones (totales, máximos, conteos) usa filtros y top; evita pedir más datos de los necesarios.”*
+
+Con eso el agente puede seguir respondiendo a “cliente con más facturas” o “facturado este mes” usando menos tokens y respuestas más concisas.
+
 ## 🔍 Herramientas Disponibles
 
 El servidor MCP de knowall-ai expone 6 herramientas:
